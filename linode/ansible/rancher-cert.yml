@@ -1,0 +1,84 @@
+---
+- name: Install Rancher and Cert-Manager on Kubernetes
+  hosts: masters  # Target your master node
+  become: yes
+  tasks:
+    - name: Update yum cache
+      yum:
+        name: '*'
+        state: latest
+        update_cache: yes
+    - name: Install curl
+      yum:
+        name: 
+          - curl
+          - tar
+          - git 
+        state: latest
+
+    - name: Download Helm installation script
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get_helm.sh
+        mode: '0755'
+
+    - name: Run the Helm installation script
+      command: /tmp/get_helm.sh
+
+
+    - name: Add the Cert-Manager Helm repository
+      shell: helm repo add jetstack https://charts.jetstack.io
+
+    - name: Update Helm repositories
+      shell: helm repo update
+
+    - name: Install or Upgrade Cert-Manager
+      shell: >
+        helm upgrade --install cert-manager jetstack/cert-manager
+        --namespace cert-manager --create-namespace
+        --version v1.10.0 --set installCRDs=true
+
+    - name: Add the Rancher Helm repository
+      shell: helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
+      
+
+    - name: Update Helm repositories again
+      shell: helm repo update
+
+    - name: Ensure namespace for Rancher exists
+      shell: |
+        kubectl get namespace cattle-system || kubectl create namespace cattle-system
+
+    - name: Install Rancher using Helm
+      shell: >
+        helm upgrade --install rancher rancher-stable/rancher
+        --namespace cattle-system
+        --set hostname={{ rancher_hostname }}
+        --set bootstrapPassword=admin 
+        --set ingress.tls.source=letsEncrypt 
+        --set letsEncrypt.email=ananae@ex.org 
+        --set letsEncrypt.ingress.class=nginx 
+        --set ingress.ingressClassName=nginx --create-namespace
+        --set replicas=3  # Adjust the number of replicas as needed
+        --set ingress.extraAnnotations.cert-manager.io/cluster-issuer="letsencrypt-prod"
+      vars:
+        rancher_hostname: rancher.anaeleboo.com  # Replace with your desired hostname
+
+    - name: Create a ClusterIssuer for Let's Encrypt
+      shell: |
+        kubectl apply -f - <<EOF
+        apiVersion: cert-manager.io/v1
+        kind: ClusterIssuer
+        metadata:
+          name: letsencrypt-prod
+        spec:
+          acme:
+            server: https://acme-v02.api.letsencrypt.org/directory
+            email: yannick@gmail.com  # Replace with your email
+            privateKeySecretRef:
+              name: letsencrypt-prod
+            solvers:
+            - http01:
+                ingress:
+                  class: nginx
+        EOF

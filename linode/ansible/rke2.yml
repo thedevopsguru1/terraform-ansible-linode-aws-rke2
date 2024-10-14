@@ -1,0 +1,208 @@
+---
+- name: Install RKE2 on Master Node
+  hosts: masters
+  become: yes
+  tasks:
+    - name: Install required packages
+      yum:
+        name:
+          - curl
+          - wget
+          - vim
+          - iptables
+          - conntrack
+          - socat
+          - net-tools
+          - nfs-utils
+          - cryptsetup
+          - firewalld
+          - iscsi-initiator-utils
+        state: present
+    - name: enable iscsi for Longhorn
+      ansible.builtin.systemd:
+        name: iscsid.service
+        enabled: yes
+        state: started
+    - name: Set hostname for master
+      hostname:
+        name: "{{ inventory_hostname }}"
+    - name: Install RKE2 using the official script
+      shell: curl -sfL https://get.rke2.io | sh -
+      register: rke2_install
+      changed_when: rke2_install.rc != 0
+
+    - name: Enable and start RKE2 service
+      systemd:
+        name: rke2-server
+        enabled: yes
+        state: started
+
+    - name: Wait for RKE2 to become ready
+      wait_for:
+        port: 6443
+        delay: 10
+        timeout: 300
+        state: started
+
+    - name: Get the RKE2 token
+      command: cat /var/lib/rancher/rke2/server/node-token
+      register: rke2_token
+
+    - name: Print the RKE2 token
+      debug:
+        msg: "RKE2 token: {{ rke2_token.stdout }}"
+    - name: Set RKE2 token fact
+      set_fact:
+        rke2_token: "{{ rke2_token.stdout }}"
+    - name: Ensure .kube directory exists
+      file:
+        path: /root/.kube
+        state: directory
+        mode: '0700'  
+    - name: Copy kubeconfig for kubectl access
+      copy:
+        src: /etc/rancher/rke2/rke2.yaml
+        dest: ~/.kube/config
+        remote_src: yes
+        owner: "{{ ansible_user }}"
+        mode: '0600'
+
+    - name: Download kubectl binary
+      get_url:
+        url: https://dl.k8s.io/release/v1.25.0/bin/linux/amd64/kubectl
+        dest: /usr/local/bin/kubectl
+        mode: '0755'
+
+    - name: Verify kubectl installation
+      command: kubectl version --client
+      register: kubectl_version
+
+    - name: Print kubectl version
+      debug:
+        msg: "kubectl version: {{ kubectl_version.stdout }}"
+    # Firewall configuration
+    - name: Ensure firewalld is installed
+      yum:
+        name: firewalld
+        state: present
+
+    - name: Start and enable firewalld
+      systemd:
+        name: firewalld
+        enabled: yes
+        state: started
+
+    - name: Allow traffic on port 9345
+      firewalld:
+        port: 9345/tcp
+        permanent: yes
+        state: enabled
+        immediate: yes
+    - name: Disable and stop firewalld
+      systemd:
+        name: firewalld
+        state: stopped
+        enabled: no
+- name: Install RKE2 on Worker Nodes
+  hosts: workers
+  become: yes
+  vars:
+    rke2_version: "v1.30.5"
+  tasks:
+    - name: Install required packages
+      yum:
+        name:
+          - curl
+          - wget
+          - iptables
+          - conntrack
+          - socat
+          - net-tools
+          - firewalld
+          - nfs-utils
+          - cryptsetup 
+          - iscsi-initiator-utils
+        state: present
+    - name: enable iscsi for Longhorn
+      ansible.builtin.systemd:
+        name: iscsid.service
+        enabled: yes
+        state: started
+        
+    - name: Set hostname for worker nodes
+      hostname:
+        name: "{{ inventory_hostname }}"
+    - name: Start and enable firewalld
+      systemd:
+        name: firewalld
+        enabled: yes
+        state: started 
+    - name: Allow traffic on port 9345
+      firewalld:
+        port: 9345/tcp
+        permanent: yes
+        state: enabled
+        immediate: yes  # Apply changes immediately
+    - name: Disable and stop firewalld
+      systemd:
+        name: firewalld
+        state: stopped
+        enabled: no
+    - name: Wait for the master to finish and set rke2_token fact
+      set_fact:
+        rke2_token: "{{ hostvars['master'].rke2_token }}"   # change the master with the master alias
+      run_once: true  # Ensure this runs only once on the master
+
+
+    - name: Install RKE2 using the official script
+      shell: curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE="agent" sh -
+      register: rke2_install
+
+    - name: Configure RKE2 agent to connect to the server
+      block:
+        - name: Ensure the config file exists
+          file:
+            path: /etc/rancher/rke2/config.yaml
+            state: touch
+
+        - name: Write RKE2 configuration for agent
+          lineinfile:
+            path: /etc/rancher/rke2/config.yaml
+            line: "{{ item }}"
+            create: yes
+          loop:
+            - "server: https://{{ hostvars['master'].ansible_host }}:9345"   # change the master with the master alias
+            - "token: {{ rke2_token }}"
+    - name: Enable and start RKE2 agent service
+      systemd:
+        name: rke2-agent
+        enabled: yes
+        state: started
+
+- name: check to see if the nodes registered normally
+  hosts: masters
+  become: yes
+  tasks:  
+      
+    - name: Get nodes using kubectl
+      command: kubectl get nodes -o wide
+      register: kubectl_output
+      ignore_errors: true  # Optional: ignore errors if the command fails
+
+    - name: Display kubectl get nodes output
+      debug:
+        msg: |
+          **Kubernetes Nodes:**
+          {{ kubectl_output.stdout }} 
+    - name: Label worker nodes
+      shell: |
+        kubectl label nodes {{ item }} node-role.kubernetes.io/worker=true --overwrite  # Update label key and value as needed
+      loop: "{{ groups['workers'] }}"
+      register: label_result
+      ignore_errors: yes
+
+    - name: Show label result
+      debug:
+        var: label_result.stdout_lines
+- import_playbook: rancher-cert.yml 
+#- import_playbook: ingresscontroller.yml  # if ingress not installed
