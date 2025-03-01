@@ -204,5 +204,8 @@
     - name: Show label result
       debug:
         var: label_result.stdout_lines
-- import_playbook: rancher-cert.yml 
+- import_playbook: rancher-cert.yml
+- import_playbook: netapp.yml
+- import_playbook: k9s.yml
+
 #- import_playbook: ingresscontroller.yml  # if ingress not installed

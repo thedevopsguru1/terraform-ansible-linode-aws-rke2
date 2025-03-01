@@ -1,0 +1,95 @@
+---
+- name: Install Helm on Head Node
+  hosts: masters
+  become: yes
+  tasks:
+    - name: Download Helm install script
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get_helm.sh
+        mode: '0755'
+
+    - name: Install Helm
+      command: /tmp/get_helm.sh
+      args:
+        creates: /usr/local/bin/helm  # Ensures Helm isn't reinstalled if already present
+
+    - name: Verify Helm installation
+      command: helm version
+      register: helm_output
+      changed_when: false
+
+    - name: Display Helm version
+      debug:
+        msg: "{{ helm_output.stdout }}"
+
+- name: Install and Configure Trident on Worker Nodes
+  hosts: workers
+  become: yes
+  serial: 1  # Process one worker at a time
+
+  tasks:
+    - name: Install required OS packages
+      yum:
+        name:
+          - nfs-utils
+          - lsscsi
+          - iscsi-initiator-utils
+          - device-mapper-multipath
+        state: present
+
+    - name: Configure iSCSI multipathing
+      command: mpathconf --enable --with_multipathd y --find_multipaths n
+      changed_when: false
+
+    - name: Enable and start required services
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      loop:
+        - iscsid
+        - multipathd
+        - iscsi
+
+    - name: Drain the node before reboot
+      command: >
+        kubectl drain {{ inventory_hostname }} --force --ignore-daemonsets --delete-emptydir-data
+      delegate_to: master
+      ignore_errors: true  # Ensures playbook continues even if a node fails to drain
+
+    - name: Reboot the node
+      reboot:
+        reboot_timeout: 600
+        test_command: uptime
+
+    - name: Wait for node to become Ready
+      command: >
+        kubectl wait --for=condition=Ready node/{{ inventory_hostname }} --timeout=300s
+      delegate_to: master
+
+    - name: Uncordon the node after reboot
+      command: kubectl uncordon {{ inventory_hostname }}
+      delegate_to: master
+
+- name: Deploy Trident using Helm
+  hosts: master
+  become: yes
+  tasks:
+    - name: Add Trident Helm repository
+      command: helm repo add netapp-trident https://netapp.github.io/trident-helm-chart
+
+    - name: Update Helm repositories
+      command: helm repo update
+
+    - name: Create Trident namespace
+      command: kubectl create namespace trident
+
+    - name: Install Trident using Helm
+      command: >
+        helm upgrade --install trident netapp-trident/trident-operator \
+        --set iscsiSelfHealingInterval=3m0s \
+        --set iscsiSelfHealingWaitTime=6m0s \
+        -n trident 
+       
+ 
